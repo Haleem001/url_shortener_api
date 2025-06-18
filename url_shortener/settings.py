@@ -29,7 +29,7 @@ SECRET_KEY = os.getenv('DJANGO_SECRET_KEY')
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['url-shortener-api-4496.onrender.com','localhost', '127.0.0.1']
+ALLOWED_HOSTS = ['*']
 # Replace DEFAULT_FILE_STORAGE with STORAGES (Django 4.2+)
 STORAGES = {
     "default": {
@@ -148,7 +148,7 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = 'url_shortener.wsgi.application'
+WSGI_APPLICATION = 'url_shortener.wsgi.app'
 
 
 # Database

@@ -1,66 +1,50 @@
 from django.db import models
-import hashlib
-from django.core.validators import URLValidator
-from django.core.exceptions import ValidationError
+from django.contrib.auth.models import AbstractUser
+from django.conf import settings
+import string
+import random
+import qrcode
 from io import BytesIO
 from django.core.files.base import ContentFile
-import qrcode
-from django.conf import settings
-from django.contrib.auth.models import AbstractUser
-import random
-import string
+from cloudinary.models import CloudinaryField
 
 class CustomUser(AbstractUser):
     email = models.EmailField(unique=True, max_length=255)
-    quota = models.PositiveIntegerField(default=100, help_text="Number of URLs a user can shorten per month")
-        
-    def __str__(self):
-        return self.email
+    quota = models.PositiveIntegerField(
+        default=100, 
+        help_text='Number of URLs a user can shorten per month'
+    )
+    
+    USERNAME_FIELD = 'email'
+    REQUIRED_FIELDS = ['username']
 
 class ShortenedURL(models.Model):
-    original_url = models.URLField(max_length=2000)
-    short_code = models.CharField(max_length=10, unique=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    visit_count = models.PositiveIntegerField(default=0)
-    qr_code = models.ImageField(upload_to='qr_codes/', blank=True, null=True)
+    original_url = models.URLField(max_length=2048)
+    short_code = models.CharField(max_length=10, unique=True, db_index=True)
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, 
-        on_delete=models.CASCADE, 
-        null=True,  # Allow null for anonymous users
-        blank=True  # Allow blank in forms
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='shortened_urls',
+        null=True,
+        blank=True
     )
+    visit_count = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True)
+    is_flagged = models.BooleanField(default=False)
+    flag_reason = models.TextField(blank=True, null=True)
+    qr_code = CloudinaryField('qr_codes', blank=True, null=True)
 
-    def generate_qr_code(self):
-        qr = qrcode.QRCode(
-            version=1,
-            error_correction=qrcode.constants.ERROR_CORRECT_L,
-            box_size=10,
-            border=4,
-        )
-        
-        # Get the full short URL
-        short_url = f"http://{settings.DOMAIN}/{self.short_code}"
-        qr.add_data(short_url)
-        qr.make(fit=True)
-        
-        img = qr.make_image(fill_color="black", back_color="white")
-        
-        # Save to model
-        buffer = BytesIO()
-        img.save(buffer, format="PNG")
-        filename = f"qr_{self.short_code}.png"
-        
-        # Ensure we're using Cloudinary storage
-        buffer.seek(0)  # Reset buffer position
-        self.qr_code.save(filename, ContentFile(buffer.getvalue()), save=True)
-        buffer.close()
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['short_code']),
+            models.Index(fields=['user', '-created_at']),
+        ]
 
-
-    def save(self, *args, **kwargs):
-        if not self.short_code:
-            # Generate short code if not provided
-            self.short_code = self.generate_short_code()
-        super().save(*args, **kwargs)
+    def __str__(self):
+        return f"{self.short_code} -> {self.original_url}"
 
     @staticmethod
     def generate_short_code(length=6):
@@ -70,13 +54,56 @@ class ShortenedURL(models.Model):
             if not ShortenedURL.objects.filter(short_code=code).exists():
                 return code
 
-    def clean(self):
-        # Validate URL format
-        validator = URLValidator()
+    def save(self, *args, **kwargs):
+        if not self.short_code:
+            self.short_code = self.generate_short_code()
+        super().save(*args, **kwargs)
+    def generate_qr_code(self):
+        import cloudinary.uploader
+        
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=4,
+        )
+        
+        # Use settings.DOMAIN if available, otherwise use a default
+        domain = getattr(settings, 'DOMAIN', 'localhost:8000')
+        short_url = f"http://{domain}/{self.short_code}"
+        qr.add_data(short_url)
+        qr.make(fit=True)
+        
+        img = qr.make_image(fill_color="black", back_color="white")
+        
+        buffer = BytesIO()
+        img.save(buffer, format="PNG")
+        buffer.seek(0)
+        
         try:
-            validator(self.original_url)
-        except ValidationError as e:
-            raise ValidationError({'original_url': 'Enter a valid URL'})
+            # Upload directly to Cloudinary
+            upload_result = cloudinary.uploader.upload(
+                buffer.getvalue(),
+                public_id=f"qr_codes/qr_{self.short_code}",
+                format="png",
+                resource_type="image"
+            )
+            
+            # Store the Cloudinary public_id in the CloudinaryField
+            from cloudinary import CloudinaryImage
+            self.qr_code = CloudinaryImage(upload_result['public_id'])
+            
+            # Save the model instance
+            self.save(update_fields=['qr_code'])
+            
+        except Exception as e:
+            print(f"Error uploading QR code to Cloudinary: {e}")
+            # Handle the error as needed
+            
+        finally:
+            buffer.close()
 
-    def __str__(self):
-        return f"{self.short_code} -> {self.original_url}"
+
+
+
+
